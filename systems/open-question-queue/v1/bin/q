@@ -1,0 +1,79 @@
+#!/usr/bin/env node
+// q: manage the open-question queue (open-question-queue v1).
+//   q add --question "..." --context "..." [--chat <id>]
+//   q list [--all]
+//   q done <Q-n> | q skip <Q-n>
+//   q due   (JSON of items due for a nudge)
+const fs = require('fs');
+const path = require('path');
+
+const QUEUE = path.join(__dirname, '..', 'queue.jsonl');
+
+function read() {
+  if (!fs.existsSync(QUEUE)) return [];
+  return fs.readFileSync(QUEUE, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+}
+function write(items) {
+  fs.writeFileSync(QUEUE, items.map(i => JSON.stringify(i)).join('\n') + '\n');
+}
+function nextId(items) {
+  let n = 0;
+  for (const i of items) { const m = /^Q-(\d+)$/.exec(i.id); if (m) n = Math.max(n, +m[1]); }
+  return 'Q-' + (n + 1);
+}
+function ago(iso) {
+  const h = Math.round((Date.now() - new Date(iso).getTime()) / 3600000);
+  if (h < 1) return 'just now';
+  if (h < 24) return h + 'h ago';
+  return Math.round(h / 24) + 'd ago';
+}
+function dueItems(items) {
+  const now = Date.now();
+  return items.filter(i => i.status === 'open'
+    && now - new Date(i.asked_at).getTime() > 6 * 3600e3
+    && (!i.last_nudged_at || now - new Date(i.last_nudged_at).getTime() > 20 * 3600e3));
+}
+
+const [cmd, ...rest] = process.argv.slice(2);
+function flag(name) {
+  const i = rest.indexOf('--' + name);
+  return i >= 0 ? rest[i + 1] : null;
+}
+
+if (cmd === 'add') {
+  const question = flag('question');
+  if (!question) { console.error('missing --question'); process.exit(1); }
+  const items = read();
+  const id = nextId(items);
+  items.push({
+    id, asked_at: new Date().toISOString(),
+    chat: flag('chat') || 'main',
+    question, context: flag('context') || '',
+    status: 'open', last_nudged_at: null, nudge_count: 0, resolved_at: null,
+  });
+  write(items);
+  console.log('added ' + id);
+} else if (cmd === 'list') {
+  const all = rest.includes('--all');
+  const items = read().filter(i => all || i.status === 'open');
+  if (!items.length) { console.log(all ? 'queue empty' : 'nothing open'); process.exit(0); }
+  for (const i of items) {
+    const state = i.status === 'open'
+      ? `open, asked ${ago(i.asked_at)}, nudged ${i.nudge_count}x`
+      : `${i.status}, resolved ${ago(i.resolved_at)}`;
+    console.log(`${i.id} [${state}] ${i.question}${i.context ? ` - ${i.context}` : ''}`);
+  }
+} else if (cmd === 'done' || cmd === 'skip') {
+  const id = rest[0];
+  const items = read();
+  const it = items.find(i => i.id === id);
+  if (!it) { console.error('no such id: ' + id); process.exit(1); }
+  it.status = cmd === 'done' ? 'answered' : 'skipped';
+  it.resolved_at = new Date().toISOString();
+  write(items);
+  console.log(id + ' -> ' + it.status);
+} else if (cmd === 'due') {
+  console.log(JSON.stringify(dueItems(read()), null, 2));
+} else {
+  console.error('usage: q add|list|done|skip|due'); process.exit(1);
+}
